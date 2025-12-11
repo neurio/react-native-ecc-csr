@@ -7,6 +7,7 @@ Pod::Spec.new do |s|
   s.version      = package["version"]
   s.summary      = package["description"] || "ECC CSR generation for React Native"
   s.homepage     = package["homepage"] || "https://github.com/neurio/react-native-ecc-csr"
+  s.authors      = package["author"] || { "Generac" => "developer@generac.com" }
   s.license      = package["license"] || "MIT"
 
   s.platforms    = { :ios => "12.0" }
