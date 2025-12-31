@@ -116,7 +116,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String country = params.hasKey("country") ? params.getString("country") : DEFAULT_COUNTRY;
             String state = params.hasKey("state") ? params.getString("state") : DEFAULT_STATE;
             String locality = params.hasKey("locality") ? params.getString("locality") : DEFAULT_LOCALITY;
-            String organization = params.hasKey("organization") ? params.getString("organization") : DEFAULT_ORGANIZATION;
+            String organization = params.hasKey("organization") ? params.getString("organization")
+                    : DEFAULT_ORGANIZATION;
             String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit")
                     : DEFAULT_ORGANIZATIONAL_UNIT;
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
@@ -163,7 +164,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             // Configure key generation with hardware backing
             KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
                     privateKeyAlias,
-                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY)
+                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY | KeyProperties.PURPOSE_AGREE_KEY)
                     .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
                     .setDigests(
                             KeyProperties.DIGEST_SHA256,
@@ -178,6 +179,9 @@ public class CSRModule extends ReactContextBaseJavaModule {
             KeyPair keyPair = keyPairGenerator.generateKeyPair();
             PrivateKey privateKey = keyPair.getPrivate();
             PublicKey publicKey = keyPair.getPublic();
+
+            Log.d(MODULE_NAME, "✓ Key pair generated with alias: " + privateKeyAlias);
+            Log.d(MODULE_NAME, "✓ Key purposes: SIGN | VERIFY | AGREE_KEY (for TLS)");
 
             // Build the subject DN
             StringBuilder subjectBuilder = new StringBuilder();
@@ -261,9 +265,12 @@ public class CSRModule extends ReactContextBaseJavaModule {
             response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
             response.putBoolean("isHardwareBacked", isHardwareBacked(privateKeyAlias));
 
+            Log.d(MODULE_NAME, "✓ CSR generated successfully");
+
             promise.resolve(response);
 
         } catch (Exception e) {
+            Log.e(MODULE_NAME, "❌ CSR generation failed", e);
             promise.reject("CSR_GENERATION_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
         }
     }
@@ -274,8 +281,10 @@ public class CSRModule extends ReactContextBaseJavaModule {
             KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
             keyStore.load(null);
             keyStore.deleteEntry(privateKeyAlias);
+            Log.d(MODULE_NAME, "✓ Key deleted: " + privateKeyAlias);
             promise.resolve(true);
         } catch (Exception e) {
+            Log.e(MODULE_NAME, "❌ Failed to delete key", e);
             promise.reject("DELETE_KEY_ERROR", "Failed to delete key: " + e.getMessage(), e);
         }
     }
