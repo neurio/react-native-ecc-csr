@@ -123,6 +123,7 @@ public class CSRModule extends ReactContextBaseJavaModule {
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : DEFAULT_IP_ADDRESS;
+            String dnsName = params.hasKey("dnsName") ? params.getString("dnsName") : null;
             String curve = params.hasKey("curve") ? params.getString("curve") : DEFAULT_ECC_CURVE;
             String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
 
@@ -218,6 +219,23 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             // Add IP Address
             sanList.add(new GeneralName(GeneralName.iPAddress, ipAddress));
+
+            if (dnsName != null && !dnsName.trim().isEmpty()) {
+                try {
+                    // Support multiple DNS names separated by commas
+                    String[] dnsNames = dnsName.split(",");
+                    for (String dns : dnsNames) {
+                        String trimmedDns = dns.trim();
+                        if (!trimmedDns.isEmpty()) {
+                            sanList.add(new GeneralName(GeneralName.dNSName, trimmedDns));
+                            Log.d(MODULE_NAME, "Added DNS name to SAN: " + trimmedDns);
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(MODULE_NAME, "Failed to add DNS name to SAN", e);
+                    // Continue without DNS rather than failing the entire CSR
+                }
+            }
 
             // Add phone info as URI if provided
             if (phoneInfo != null && !phoneInfo.trim().isEmpty()) {

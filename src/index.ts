@@ -13,8 +13,9 @@ export interface CSRParams {
   commonName: string;
   serialNumber?: string;
   ipAddress?: string;
+  dnsName: string;
   curve?: ECCurve; // P-256, P-384 (default), or P-521
-  privateKeyAlias: string; // REQUIRED: Android Keystore alias
+  privateKeyAlias: string;
   phoneInfo?: string;
 }
 
