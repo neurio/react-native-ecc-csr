@@ -29,6 +29,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
         NSString *organization = params[@"organization"] ?: DEFAULT_ORGANIZATION;
         NSString *organizationalUnit = params[@"organizationalUnit"] ?: DEFAULT_ORGANIZATIONAL_UNIT;
         NSString *ipAddress = params[@"ipAddress"] ?: DEFAULT_IP_ADDRESS;
+        NSString *dnsName = params[@"dnsName"];
         NSString *curve = params[@"curve"] ?: DEFAULT_ECC_CURVE;
         NSString *phoneInfo = params[@"phoneInfo"]; 
         NSString *privateKeyAlias = params[@"privateKeyAlias"];
@@ -82,6 +83,7 @@ RCT_EXPORT_METHOD(generateCSR:(NSDictionary *)params
                                          privateKey:privateKey
                                               curve:normalizedCurve
                                           ipAddress:ipAddress
+                                          dnsName:dnsName
                                           phoneInfo:phoneInfo 
                                               error:&error];
         
@@ -382,6 +384,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
                      privateKey:(SecKeyRef)privateKey
                           curve:(NSString *)curve
                       ipAddress:(NSString *)ipAddress
+                      dnsName:(NSString *)dnsName
                       phoneInfo:(NSString *)phoneInfo 
                           error:(NSError **)error {
     
@@ -390,7 +393,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     NSData *publicKeyInfo = [self exportPublicKey:publicKey error:error];
     if (*error) return nil;
     
-    NSData *extensions = [self buildExtensions:ipAddress phoneInfo:phoneInfo];
+    NSData *extensions = [self buildExtensions:ipAddress dnsName:dnsName phoneInfo:phoneInfo];
     NSData *attributes = [self buildAttributes:extensions];
     
     // Build CertificationRequestInfo
@@ -505,7 +508,7 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 
 #pragma mark - Extensions
 
-- (NSData *)buildExtensions:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
+- (NSData *)buildExtensions:(NSString *)ipAddress dnsName:(NSString *)dnsName phoneInfo:(NSString *)phoneInfo {
     NSMutableData *extensions = [NSMutableData data];
     
     // Key Usage extension (critical)
@@ -517,8 +520,8 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
     [extensions appendData:extKeyUsage];
     
     // Subject Alternative Name extension (if IP or phoneInfo provided)
-    if ((ipAddress && ipAddress.length > 0) || (phoneInfo && phoneInfo.length > 0)) {
-        NSData *san = [self buildSubjectAltNameExtension:ipAddress phoneInfo:phoneInfo];  // ⭐️ Pass phoneInfo
+    if ((ipAddress && ipAddress.length > 0) || (dnsName && dnsName.length > 0) || (phoneInfo && phoneInfo.length > 0)) {
+        NSData *san = [self buildSubjectAltNameExtension:ipAddress dnsName:dnsName phoneInfo:phoneInfo];
         [extensions appendData:san];
     }
     
@@ -559,8 +562,43 @@ RCT_EXPORT_METHOD(getPublicKey:(NSString *)privateKeyAlias
 }
 
 
-- (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress phoneInfo:(NSString *)phoneInfo {
+- (NSData *)buildSubjectAltNameExtension:(NSString *)ipAddress dnsName:(NSString *)dnsName phoneInfo:(NSString *)phoneInfo {
     NSMutableData *sanData = [NSMutableData data];
+
+    // Add DNS Name(s) if provided
+    if (dnsName && dnsName.length > 0) {
+        @try {
+            // Support multiple DNS names separated by commas
+            NSArray *dnsNames = [dnsName componentsSeparatedByString:@","];
+            
+            for (NSString *dns in dnsNames) {
+                NSString *trimmedDns = [dns stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+                
+                if (trimmedDns.length > 0) {
+                    // Encode as UTF8
+                    NSData *dnsData = [trimmedDns dataUsingEncoding:NSUTF8StringEncoding];
+                    
+                    // Build DNS name (CONTEXT SPECIFIC [2])
+                    NSMutableData *dnsTag = [NSMutableData data];
+                    unsigned char tag = 0x82; // CONTEXT [2] - dNSName
+                    
+                    // Encode length
+                    NSData *lengthData = [self encodeLength:dnsData.length];
+                    
+                    [dnsTag appendBytes:&tag length:1];
+                    [dnsTag appendData:lengthData];
+                    [dnsTag appendData:dnsData];
+                    
+                    [sanData appendData:dnsTag];
+                    
+                    NSLog(@"✅ Added DNS name to SAN: %@", trimmedDns);
+                }
+            }
+        } @catch (NSException *exception) {
+            NSLog(@"⚠️ Failed to add DNS name to SAN: %@", exception.reason);
+            // Continue without DNS rather than failing the entire CSR
+        }
+    }
     
     // Add IP Address if provided
     if (ipAddress && ipAddress.length > 0) {
