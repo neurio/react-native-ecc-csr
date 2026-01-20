@@ -163,9 +163,21 @@ public class CSRModule extends ReactContextBaseJavaModule {
                     ANDROID_KEYSTORE);
 
             // Configure key generation with hardware backing
+            // Build purposes based on API level
+            int purposes = KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY;
+
+            // PURPOSE_AGREE_KEY is only available on Android 12+ (API 31+)
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                purposes |= KeyProperties.PURPOSE_AGREE_KEY;
+                Log.d(MODULE_NAME, "✓ Including PURPOSE_AGREE_KEY (Android 12+)");
+            } else {
+                Log.d(MODULE_NAME, "⚠ Skipping PURPOSE_AGREE_KEY (requires Android 12+, current API: " + 
+                      android.os.Build.VERSION.SDK_INT + ")");
+            }
+
             KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
                     privateKeyAlias,
-                    KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY | KeyProperties.PURPOSE_AGREE_KEY)
+                    purposes)
                     .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
                     .setDigests(
                             KeyProperties.DIGEST_SHA256,
@@ -182,7 +194,8 @@ public class CSRModule extends ReactContextBaseJavaModule {
             PublicKey publicKey = keyPair.getPublic();
 
             Log.d(MODULE_NAME, "✓ Key pair generated with alias: " + privateKeyAlias);
-            Log.d(MODULE_NAME, "✓ Key purposes: SIGN | VERIFY | AGREE_KEY (for TLS)");
+            Log.d(MODULE_NAME, "✓ Key purposes: SIGN | VERIFY" + 
+                  (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S ? " | AGREE_KEY (for TLS)" : ""));
 
             // Build the subject DN
             StringBuilder subjectBuilder = new StringBuilder();
