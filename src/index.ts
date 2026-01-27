@@ -17,6 +17,7 @@ export interface CSRParams {
   curve?: ECCurve; // P-256, P-384 (default), or P-521
   privateKeyAlias: string;
   phoneInfo?: string;
+  useHardwareKey?: boolean;
 }
 
 export interface CSRResult {
