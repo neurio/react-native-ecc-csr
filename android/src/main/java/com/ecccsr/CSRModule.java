@@ -20,34 +20,33 @@ import org.bouncycastle.asn1.x509.GeneralNames;
 import org.bouncycastle.asn1.x509.KeyUsage;
 import org.bouncycastle.asn1.x509.KeyPurposeId;
 import org.bouncycastle.asn1.x509.ExtendedKeyUsage;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
 import org.bouncycastle.operator.ContentSigner;
 import org.bouncycastle.operator.DefaultSignatureAlgorithmIdentifierFinder;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 import org.bouncycastle.pkcs.PKCS10CertificationRequest;
 import org.bouncycastle.pkcs.PKCS10CertificationRequestBuilder;
 import org.bouncycastle.pkcs.jcajce.JcaPKCS10CertificationRequestBuilder;
 
-import java.io.ByteArrayOutputStream;
-import java.io.OutputStream;
-import java.io.StringWriter;
-import java.security.KeyFactory;
-import java.security.Signature;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.security.KeyStore;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.Security;
+import java.io.*;
+import java.math.BigInteger;
+import java.security.*;
+import java.security.cert.X509Certificate;
 import java.security.spec.ECGenParameterSpec;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
 
 public class CSRModule extends ReactContextBaseJavaModule {
 
     private static final String MODULE_NAME = "CSRModule";
     private static final String ANDROID_KEYSTORE = "AndroidKeyStore";
+    private static final String SOFTWARE_KEYSTORE_FILE = "software_keys.p12";
     private static final String DEFAULT_COUNTRY = "US";
     private static final String DEFAULT_STATE = "Colorado";
     private static final String DEFAULT_LOCALITY = "Denver";
@@ -58,7 +57,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
     public CSRModule(ReactApplicationContext reactContext) {
         super(reactContext);
-        // Only add BC provider if not already present
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
             Security.addProvider(new BouncyCastleProvider());
         }
@@ -69,11 +67,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
         return MODULE_NAME;
     }
 
-    /**
-     * Custom ContentSigner implementation for Android Keystore
-     * Android Keystore requires using Signature API directly, not through
-     * BouncyCastle
-     */
     private static class AndroidKeystoreContentSigner implements ContentSigner {
         private final ByteArrayOutputStream outputStream;
         private final AlgorithmIdentifier sigAlgId;
@@ -82,8 +75,6 @@ public class CSRModule extends ReactContextBaseJavaModule {
         public AndroidKeystoreContentSigner(PrivateKey privateKey, String algorithm) throws Exception {
             this.outputStream = new ByteArrayOutputStream();
             this.sigAlgId = new DefaultSignatureAlgorithmIdentifierFinder().find(algorithm);
-
-            // Use Android's Signature class, not BouncyCastle
             this.signature = Signature.getInstance(algorithm);
             this.signature.initSign(privateKey);
         }
@@ -109,95 +100,131 @@ public class CSRModule extends ReactContextBaseJavaModule {
         }
     }
 
+    private X509Certificate createSelfSignedCertificate(KeyPair keyPair, String subjectDN) throws Exception {
+        long now = System.currentTimeMillis();
+        Date startDate = new Date(now);
+        Date endDate = new Date(now + 365L * 24 * 60 * 60 * 1000);
+
+        X500Name subject = new X500Name(subjectDN);
+        BigInteger serialNumber = BigInteger.valueOf(now);
+        SubjectPublicKeyInfo publicKeyInfo = SubjectPublicKeyInfo.getInstance(keyPair.getPublic().getEncoded());
+
+        X509v3CertificateBuilder certBuilder = new X509v3CertificateBuilder(
+                subject, serialNumber, startDate, endDate, subject, publicKeyInfo);
+
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withECDSA")
+                .setProvider("BC")
+                .build(keyPair.getPrivate());
+
+        return new JcaX509CertificateConverter()
+                .setProvider("BC")
+                .getCertificate(certBuilder.build(signer));
+    }
+
+    /**
+     * Generates a Certificate Signing Request (CSR) with ECC key pair.
+     * Default: Software keys (hardware keys don't work reliably for TLS on many devices)
+     * 
+     * @param params CSR parameters including privateKeyAlias and optional useHardwareKey flag
+     * @param promise Promise resolving to CSR, key alias, public key, and hardware status
+     */
     @ReactMethod
     public void generateCSR(ReadableMap params, Promise promise) {
         try {
-            // Extract parameters
             String country = params.hasKey("country") ? params.getString("country") : DEFAULT_COUNTRY;
             String state = params.hasKey("state") ? params.getString("state") : DEFAULT_STATE;
             String locality = params.hasKey("locality") ? params.getString("locality") : DEFAULT_LOCALITY;
-            String organization = params.hasKey("organization") ? params.getString("organization")
-                    : DEFAULT_ORGANIZATION;
-            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit")
-                    : DEFAULT_ORGANIZATIONAL_UNIT;
+            String organization = params.hasKey("organization") ? params.getString("organization") : DEFAULT_ORGANIZATION;
+            String organizationalUnit = params.hasKey("organizationalUnit") ? params.getString("organizationalUnit") : DEFAULT_ORGANIZATIONAL_UNIT;
             String commonName = params.hasKey("commonName") ? params.getString("commonName") : "";
             String serialNumber = params.hasKey("serialNumber") ? params.getString("serialNumber") : "";
             String ipAddress = params.hasKey("ipAddress") ? params.getString("ipAddress") : DEFAULT_IP_ADDRESS;
             String dnsName = params.hasKey("dnsName") ? params.getString("dnsName") : null;
             String curve = params.hasKey("curve") ? params.getString("curve") : DEFAULT_ECC_CURVE;
             String phoneInfo = params.hasKey("phoneInfo") ? params.getString("phoneInfo") : null;
-
-            // CRITICAL: privateKeyAlias for Android Keystore
             String privateKeyAlias = params.hasKey("privateKeyAlias") ? params.getString("privateKeyAlias") : null;
+            
+            // Default to SOFTWARE keys (hardware keys don't support TLS ECDH on most devices)
+            boolean useHardwareKey = params.hasKey("useHardwareKey") ? params.getBoolean("useHardwareKey") : false;
 
             if (privateKeyAlias == null || privateKeyAlias.isEmpty()) {
-                promise.reject("MISSING_ALIAS", "privateKeyAlias is required for secure key storage");
+                promise.reject("MISSING_ALIAS", "privateKeyAlias is required");
                 return;
             }
 
-            // Validate curve
             if (!curve.equals("secp256r1") && !curve.equals("secp384r1") && !curve.equals("secp521r1")) {
                 promise.reject("INVALID_CURVE", "Curve must be one of: secp256r1, secp384r1, secp521r1");
                 return;
             }
 
-            // Map curve to Android Keystore curve
-            String keystoreCurve;
-            switch (curve) {
-                case "secp256r1":
-                    keystoreCurve = "secp256r1";
-                    break;
-                case "secp384r1":
-                    keystoreCurve = "secp384r1";
-                    break;
-                case "secp521r1":
-                    keystoreCurve = "secp521r1";
-                    break;
-                default:
-                    keystoreCurve = "secp384r1";
-            }
+            String keystoreCurve = curve;
+            KeyPair keyPair;
 
-            // Generate key pair in Android Keystore (hardware-backed)
-            KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
-                    KeyProperties.KEY_ALGORITHM_EC,
-                    ANDROID_KEYSTORE);
+            if (useHardwareKey) {
+                Log.d(MODULE_NAME, "Generating hardware-backed key pair");
+                
+                KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance(
+                        KeyProperties.KEY_ALGORITHM_EC, ANDROID_KEYSTORE);
 
-            // Configure key generation with hardware backing
-            // Build purposes based on API level
-            int purposes = KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY;
+                int purposes = KeyProperties.PURPOSE_SIGN | KeyProperties.PURPOSE_VERIFY;
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
+                    purposes |= KeyProperties.PURPOSE_AGREE_KEY;
+                }
 
-            // PURPOSE_AGREE_KEY is only available on Android 12+ (API 31+)
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S) {
-                purposes |= KeyProperties.PURPOSE_AGREE_KEY;
-                Log.d(MODULE_NAME, "✓ Including PURPOSE_AGREE_KEY (Android 12+)");
+                KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(privateKeyAlias, purposes)
+                        .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
+                        .setDigests(
+                                KeyProperties.DIGEST_SHA256,
+                                KeyProperties.DIGEST_SHA384,
+                                KeyProperties.DIGEST_SHA512)
+                        .setUserAuthenticationRequired(false)
+                        .build();
+
+                keyPairGenerator.initialize(spec);
+                keyPair = keyPairGenerator.generateKeyPair();
+                
             } else {
-                Log.d(MODULE_NAME, "⚠ Skipping PURPOSE_AGREE_KEY (requires Android 12+, current API: " + 
-                      android.os.Build.VERSION.SDK_INT + ")");
+                Log.d(MODULE_NAME, "Generating software key pair");
+                
+                KeyPairGenerator keyPairGenerator = KeyPairGenerator.getInstance("EC", "BC");
+                ECGenParameterSpec ecSpec = new ECGenParameterSpec(keystoreCurve);
+                keyPairGenerator.initialize(ecSpec, new SecureRandom());
+                keyPair = keyPairGenerator.generateKeyPair();
+                
+                KeyStore softwareKeyStore;
+                String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
+                
+                try {
+                    FileInputStream fis = new FileInputStream(keystorePath);
+                    softwareKeyStore = KeyStore.getInstance("PKCS12");
+                    softwareKeyStore.load(fis, "".toCharArray());
+                    fis.close();
+                } catch (Exception e) {
+                    softwareKeyStore = KeyStore.getInstance("PKCS12");
+                    softwareKeyStore.load(null, null);
+                }
+                
+                String tempSubject = "CN=Temp-" + privateKeyAlias;
+                X509Certificate selfSignedCert = createSelfSignedCertificate(keyPair, tempSubject);
+                
+                softwareKeyStore.setKeyEntry(
+                    privateKeyAlias,
+                    keyPair.getPrivate(),
+                    "".toCharArray(),
+                    new java.security.cert.Certificate[] { selfSignedCert }
+                );
+                
+                FileOutputStream fos = new FileOutputStream(keystorePath);
+                softwareKeyStore.store(fos, "".toCharArray());
+                fos.close();
             }
 
-            KeyGenParameterSpec.Builder specBuilder = new KeyGenParameterSpec.Builder(
-                    privateKeyAlias,
-                    purposes)
-                    .setAlgorithmParameterSpec(new ECGenParameterSpec(keystoreCurve))
-                    .setDigests(
-                            KeyProperties.DIGEST_SHA256,
-                            KeyProperties.DIGEST_SHA384,
-                            KeyProperties.DIGEST_SHA512)
-                    .setUserAuthenticationRequired(false); // Set to true if you want user auth (fingerprint/PIN)
-
-            // Initialize key generator with spec
-            keyPairGenerator.initialize(specBuilder.build());
-
-            // Generate key pair - private key NEVER leaves the hardware!
-            KeyPair keyPair = keyPairGenerator.generateKeyPair();
             PrivateKey privateKey = keyPair.getPrivate();
             PublicKey publicKey = keyPair.getPublic();
 
-            Log.d(MODULE_NAME, "✓ Key pair generated with alias: " + privateKeyAlias);
-            Log.d(MODULE_NAME, "✓ Key purposes: SIGN | VERIFY" + 
-                  (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.S ? " | AGREE_KEY (for TLS)" : ""));
+            Log.d(MODULE_NAME, "Key pair generated: " + privateKeyAlias + 
+                  " (" + (useHardwareKey ? "hardware" : "software") + ", " + keystoreCurve + ")");
 
-            // Build the subject DN
             StringBuilder subjectBuilder = new StringBuilder();
             subjectBuilder.append("C=").append(country);
             subjectBuilder.append(", ST=").append(state);
@@ -210,157 +237,192 @@ public class CSRModule extends ReactContextBaseJavaModule {
             }
 
             X500Name subject = new X500Name(subjectBuilder.toString());
-
-            // Create CSR builder
             PKCS10CertificationRequestBuilder csrBuilder = new JcaPKCS10CertificationRequestBuilder(subject, publicKey);
 
-            // Create extensions
             ExtensionsGenerator extGen = new ExtensionsGenerator();
-
-            // Add Key Usage (critical): Digital Signature, Key Agreement
-            KeyUsage keyUsage = new KeyUsage(
-                    KeyUsage.digitalSignature | KeyUsage.keyAgreement);
+            
+            KeyUsage keyUsage = new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyAgreement);
             extGen.addExtension(Extension.keyUsage, true, keyUsage);
 
-            // Add Extended Key Usage: TLS Web Client Authentication
-            ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(
-                    KeyPurposeId.id_kp_clientAuth);
+            ExtendedKeyUsage extendedKeyUsage = new ExtendedKeyUsage(KeyPurposeId.id_kp_clientAuth);
             extGen.addExtension(Extension.extendedKeyUsage, false, extendedKeyUsage);
 
-            // Build Subject Alternative Names
             List<GeneralName> sanList = new ArrayList<>();
-
-            // Add IP Address
             sanList.add(new GeneralName(GeneralName.iPAddress, ipAddress));
 
             if (dnsName != null && !dnsName.trim().isEmpty()) {
-                try {
-                    // Support multiple DNS names separated by commas
-                    String[] dnsNames = dnsName.split(",");
-                    for (String dns : dnsNames) {
-                        String trimmedDns = dns.trim();
-                        if (!trimmedDns.isEmpty()) {
-                            sanList.add(new GeneralName(GeneralName.dNSName, trimmedDns));
-                            Log.d(MODULE_NAME, "Added DNS name to SAN: " + trimmedDns);
-                        }
+                for (String dns : dnsName.split(",")) {
+                    String trimmedDns = dns.trim();
+                    if (!trimmedDns.isEmpty()) {
+                        sanList.add(new GeneralName(GeneralName.dNSName, trimmedDns));
                     }
-                } catch (Exception e) {
-                    Log.e(MODULE_NAME, "Failed to add DNS name to SAN", e);
-                    // Continue without DNS rather than failing the entire CSR
                 }
             }
 
-            // Add phone info as URI if provided
             if (phoneInfo != null && !phoneInfo.trim().isEmpty()) {
-                try {
-                    // Use URI format: phone:value or device:value or just the raw value
-                    // You can customize the prefix as needed
-                    String uriValue = "phone:" + phoneInfo.trim();
-                    sanList.add(new GeneralName(GeneralName.uniformResourceIdentifier, uriValue));
-
-                    Log.d(MODULE_NAME, "Successfully added phoneInfo as URI: " + uriValue);
-                } catch (Exception e) {
-                    Log.e(MODULE_NAME, "Failed to add phone info to SAN", e);
-                    // Continue without phone info rather than failing the entire CSR
-                }
+                sanList.add(new GeneralName(GeneralName.uniformResourceIdentifier, "phone:" + phoneInfo.trim()));
             }
 
-            // Convert list to array and create GeneralNames
-            GeneralName[] sanArray = sanList.toArray(new GeneralName[0]);
-            GeneralNames subjectAltNames = new GeneralNames(sanArray);
+            GeneralNames subjectAltNames = new GeneralNames(sanList.toArray(new GeneralName[0]));
             extGen.addExtension(Extension.subjectAlternativeName, false, subjectAltNames);
 
-            // Add extensions to CSR
-            csrBuilder.addAttribute(
-                    PKCSObjectIdentifiers.pkcs_9_at_extensionRequest,
-                    extGen.generate());
+            csrBuilder.addAttribute(PKCSObjectIdentifiers.pkcs_9_at_extensionRequest, extGen.generate());
 
-            // Sign the CSR using Android Keystore
-            // Use custom ContentSigner because Android Keystore doesn't work with
-            // BouncyCastle's builder
-            ContentSigner signer = new AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA");
+            ContentSigner signer = useHardwareKey
+                    ? new AndroidKeystoreContentSigner(privateKey, "SHA256withECDSA")
+                    : new JcaContentSignerBuilder("SHA256withECDSA").setProvider("BC").build(privateKey);
 
             PKCS10CertificationRequest csr = csrBuilder.build(signer);
 
-            // Convert CSR to PEM format
             StringWriter csrWriter = new StringWriter();
             JcaPEMWriter pemWriter = new JcaPEMWriter(csrWriter);
             pemWriter.writeObject(csr);
             pemWriter.close();
-            String csrPem = csrWriter.toString();
 
-            // Prepare response - NO PRIVATE KEY RETURNED!
             com.facebook.react.bridge.WritableMap response = com.facebook.react.bridge.Arguments.createMap();
-            response.putString("csr", csrPem);
-            response.putString("privateKeyAlias", privateKeyAlias); // Return alias only
+            response.putString("csr", csrWriter.toString());
+            response.putString("privateKeyAlias", privateKeyAlias);
             response.putString("publicKey", Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
-            response.putBoolean("isHardwareBacked", isHardwareBacked(privateKeyAlias));
+            response.putBoolean("isHardwareBacked", useHardwareKey && isHardwareBacked(privateKeyAlias));
+            response.putBoolean("useHardwareKey", useHardwareKey);
 
-            Log.d(MODULE_NAME, "✓ CSR generated successfully");
-
+            Log.d(MODULE_NAME, "CSR generated successfully");
             promise.resolve(response);
 
         } catch (Exception e) {
-            Log.e(MODULE_NAME, "❌ CSR generation failed", e);
+            Log.e(MODULE_NAME, "CSR generation failed", e);
             promise.reject("CSR_GENERATION_ERROR", "Failed to generate CSR: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Deletes a key from both hardware and software keystores
+     */
     @ReactMethod
     public void deleteKey(String privateKeyAlias, Promise promise) {
         try {
-            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
-            keyStore.load(null);
-            keyStore.deleteEntry(privateKeyAlias);
-            Log.d(MODULE_NAME, "✓ Key deleted: " + privateKeyAlias);
-            promise.resolve(true);
+            boolean deleted = false;
+            
+            try {
+                KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+                keyStore.load(null);
+                if (keyStore.containsAlias(privateKeyAlias)) {
+                    keyStore.deleteEntry(privateKeyAlias);
+                    deleted = true;
+                    Log.d(MODULE_NAME, "Deleted hardware key: " + privateKeyAlias);
+                }
+            } catch (Exception e) {
+                // Continue to software keystore
+            }
+            
+            try {
+                String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
+                FileInputStream fis = new FileInputStream(keystorePath);
+                KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+                softwareKeyStore.load(fis, "".toCharArray());
+                fis.close();
+                
+                if (softwareKeyStore.containsAlias(privateKeyAlias)) {
+                    softwareKeyStore.deleteEntry(privateKeyAlias);
+                    
+                    FileOutputStream fos = new FileOutputStream(keystorePath);
+                    softwareKeyStore.store(fos, "".toCharArray());
+                    fos.close();
+                    
+                    deleted = true;
+                    Log.d(MODULE_NAME, "Deleted software key: " + privateKeyAlias);
+                }
+            } catch (Exception e) {
+                // Continue
+            }
+            
+            promise.resolve(deleted);
         } catch (Exception e) {
-            Log.e(MODULE_NAME, "❌ Failed to delete key", e);
+            Log.e(MODULE_NAME, "Failed to delete key", e);
             promise.reject("DELETE_KEY_ERROR", "Failed to delete key: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Checks if a key exists in either hardware or software keystore
+     */
     @ReactMethod
     public void keyExists(String privateKeyAlias, Promise promise) {
         try {
-            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
-            keyStore.load(null);
-            boolean exists = keyStore.containsAlias(privateKeyAlias);
-            promise.resolve(exists);
+            try {
+                KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+                keyStore.load(null);
+                if (keyStore.containsAlias(privateKeyAlias)) {
+                    promise.resolve(true);
+                    return;
+                }
+            } catch (Exception e) {
+                // Continue to software keystore
+            }
+            
+            try {
+                String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
+                FileInputStream fis = new FileInputStream(keystorePath);
+                KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+                softwareKeyStore.load(fis, "".toCharArray());
+                fis.close();
+                
+                promise.resolve(softwareKeyStore.containsAlias(privateKeyAlias));
+            } catch (Exception e) {
+                promise.resolve(false);
+            }
         } catch (Exception e) {
             promise.reject("KEY_EXISTS_ERROR", "Failed to check key existence: " + e.getMessage(), e);
         }
     }
 
+    /**
+     * Retrieves the public key for a given alias from either keystore
+     */
     @ReactMethod
     public void getPublicKey(String privateKeyAlias, Promise promise) {
         try {
-            KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
-            keyStore.load(null);
+            try {
+                KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
+                keyStore.load(null);
 
-            if (!keyStore.containsAlias(privateKeyAlias)) {
-                promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
-                return;
+                if (keyStore.containsAlias(privateKeyAlias)) {
+                    KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
+                    if (entry instanceof KeyStore.PrivateKeyEntry) {
+                        PublicKey publicKey = ((KeyStore.PrivateKeyEntry) entry).getCertificate().getPublicKey();
+                        promise.resolve(Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
+                        return;
+                    }
+                }
+            } catch (Exception e) {
+                // Continue to software keystore
             }
-
-            // Get the public key from the KeyStore entry
-            KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
-            if (entry instanceof KeyStore.PrivateKeyEntry) {
-                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-                PublicKey publicKey = privateKeyEntry.getCertificate().getPublicKey();
-                String publicKeyBase64 = Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP);
-                promise.resolve(publicKeyBase64);
-            } else {
-                promise.reject("INVALID_ENTRY", "Entry is not a private key entry");
+            
+            String keystorePath = getReactApplicationContext().getFilesDir() + "/" + SOFTWARE_KEYSTORE_FILE;
+            FileInputStream fis = new FileInputStream(keystorePath);
+            KeyStore softwareKeyStore = KeyStore.getInstance("PKCS12");
+            softwareKeyStore.load(fis, "".toCharArray());
+            fis.close();
+            
+            if (softwareKeyStore.containsAlias(privateKeyAlias)) {
+                KeyStore.Entry entry = softwareKeyStore.getEntry(
+                    privateKeyAlias, 
+                    new KeyStore.PasswordProtection("".toCharArray())
+                );
+                if (entry instanceof KeyStore.PrivateKeyEntry) {
+                    PublicKey publicKey = ((KeyStore.PrivateKeyEntry) entry).getCertificate().getPublicKey();
+                    promise.resolve(Base64.encodeToString(publicKey.getEncoded(), Base64.NO_WRAP));
+                    return;
+                }
             }
+            
+            promise.reject("KEY_NOT_FOUND", "Key with alias '" + privateKeyAlias + "' not found");
+            
         } catch (Exception e) {
             promise.reject("GET_PUBLIC_KEY_ERROR", "Failed to get public key: " + e.getMessage(), e);
         }
     }
 
-    /**
-     * Check if the key is hardware-backed
-     */
     private boolean isHardwareBacked(String privateKeyAlias) {
         try {
             KeyStore keyStore = KeyStore.getInstance(ANDROID_KEYSTORE);
@@ -368,26 +430,18 @@ public class CSRModule extends ReactContextBaseJavaModule {
 
             KeyStore.Entry entry = keyStore.getEntry(privateKeyAlias, null);
             if (entry instanceof KeyStore.PrivateKeyEntry) {
-                KeyStore.PrivateKeyEntry privateKeyEntry = (KeyStore.PrivateKeyEntry) entry;
-
-                // Check if key is hardware-backed (available on Android 9+)
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                    try {
-                        KeyFactory factory = KeyFactory.getInstance(
-                                privateKeyEntry.getPrivateKey().getAlgorithm(),
-                                ANDROID_KEYSTORE);
-                        KeyInfo keyInfo = factory.getKeySpec(
-                                privateKeyEntry.getPrivateKey(),
-                                KeyInfo.class);
-                        return keyInfo.isInsideSecureHardware();
-                    } catch (Exception e) {
-                        // Fall back to assuming hardware-backed
-                        Log.w(MODULE_NAME, "Could not determine hardware backing status", e);
-                        return true;
-                    }
+                    KeyFactory factory = KeyFactory.getInstance(
+                            ((KeyStore.PrivateKeyEntry) entry).getPrivateKey().getAlgorithm(),
+                            ANDROID_KEYSTORE);
+                    KeyInfo keyInfo = factory.getKeySpec(
+                            ((KeyStore.PrivateKeyEntry) entry).getPrivateKey(),
+                            KeyInfo.class);
+                    return keyInfo.isInsideSecureHardware();
                 }
+                return true;
             }
-            return true; // Assume hardware-backed for older Android versions
+            return false;
         } catch (Exception e) {
             return false;
         }
