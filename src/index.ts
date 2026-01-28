@@ -14,44 +14,47 @@ export interface CSRParams {
   serialNumber?: string;
   ipAddress?: string;
   dnsName: string;
-  curve?: ECCurve; // P-256, P-384 (default), or P-521
+  curve?: ECCurve;
   privateKeyAlias: string;
   phoneInfo?: string;
+  useHardwareKey?: boolean;
 }
 
 export interface CSRResult {
   csr: string;
-  privateKeyAlias: string; // Alias to the key in Android Keystore (NOT the key itself!)
+  privateKeyAlias: string;
   publicKey: string;
-  isHardwareBacked: boolean; // Whether the key is stored in hardware
+  isHardwareBacked: boolean;
+  useHardwareKey: boolean;
 }
 
 export interface CSRModuleInterface {
   /**
-   * Generates a Certificate Signing Request (CSR) with hardware-backed ECC key pair
-   * The private key is stored securely in Android Keystore and NEVER exposed.
+   * Generates a Certificate Signing Request (CSR) with ECC key pair.
+   * Default: Software keys (more compatible with TLS on most devices)
+   * Hardware keys can be enabled via useHardwareKey parameter.
    * 
-   * @param params - CSR parameters including privateKeyAlias for secure storage
-   * @returns Promise resolving to CSR, key alias (not the key!), and public key
+   * @param params - CSR parameters including privateKeyAlias and optional useHardwareKey
+   * @returns Promise resolving to CSR, key alias, public key, and key storage info
    */
   generateCSR(params: CSRParams): Promise<CSRResult>;
 
   /**
-   * Deletes a key from Android Keystore
+   * Deletes a key from both hardware and software keystores
    * @param privateKeyAlias - The alias of the key to delete
-   * @returns Promise resolving to true if successful
+   * @returns Promise resolving to true if key was deleted
    */
   deleteKey(privateKeyAlias: string): Promise<boolean>;
 
   /**
-   * Checks if a key exists in Android Keystore
+   * Checks if a key exists in either hardware or software keystore
    * @param privateKeyAlias - The alias of the key to check
    * @returns Promise resolving to true if key exists
    */
   keyExists(privateKeyAlias: string): Promise<boolean>;
 
   /**
-   * Retrieves the public key for a given alias
+   * Retrieves the public key for a given alias from either keystore
    * @param privateKeyAlias - The alias of the key pair
    * @returns Promise resolving to base64-encoded public key
    */
